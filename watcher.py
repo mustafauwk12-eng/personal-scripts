@@ -12,20 +12,12 @@ import requests
 from bs4 import BeautifulSoup
 
 # ============ الإعدادات ============
-# القسم الأساسي: أي مشروع جديد فيه يتبعت على طول من غير أي شرط
-CATEGORY_URL = "https://mostaql.com/projects/support"   # دعم، مساعدة وإدخال بيانات
-# لو عايز تغير القسم الأساسي، غير اللينك ده. أمثلة:
-# "https://mostaql.com/projects/development"  # برمجة وتطوير
-# "https://mostaql.com/projects"              # كل الأقسام (يلغي عملياً فكرة "باقي الأقسام")
-
-ALL_PROJECTS_URL = "https://mostaql.com/projects"  # ثابت - بيستخدم لفحص "باقي الأقسام"
-
-# الكلمات المفتاحية اللي بيتم البحث عنها في باقي الأقسام (غير القسم الأساسي)
-# افصل بين كل كلمة والتانية بفاصلة. لو سبتها فاضية، مفيش بحث في باقي الأقسام خالص.
+CATEGORY_URL = "https://mostaql.com/projects/support"
+ALL_PROJECTS_URL = "https://mostaql.com/projects"
 KEYWORDS = ["إدخال بيانات", "ادخال بيانات", "اكسيل", "Excel", "Data Entry"]
 
 SEEN_FILE = "seen_ids.txt"
-MAX_STORED_IDS = 1000  # عشان الملف ميكبرش من غير داعي
+MAX_STORED_IDS = 1000
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -38,13 +30,12 @@ HEADERS = {
 }
 
 
-def fetch_projects(url: str):
-    """يجيب المشاريع المفتوحة من صفحة مستقل، ويرجعهم بترتيب النزول (الأحدث الأول)."""
+def fetch_projects(url):
     resp = requests.get(url, headers=HEADERS, timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    grouped = defaultdict(list)  # project_id -> [(نص الرابط, الرابط الكامل), ...]
+    grouped = defaultdict(list)
     project_pattern = re.compile(r"^(?:https?://mostaql\.com)?/project/(\d+)-")
 
     for a in soup.find_all("a", href=True):
@@ -61,10 +52,8 @@ def fetch_projects(url: str):
 
     projects = []
     for project_id, entries in grouped.items():
-        # أقصر نص مرتبط بنفس المشروع غالباً بيكون العنوان (مش الوصف الطويل)
         entries.sort(key=lambda pair: len(pair[0]))
         title, link = entries[0]
-        # أطول نص مرتبط بنفس المشروع غالباً بيكون وصف المشروع الكامل
         description = entries[-1][0] if len(entries) > 1 else title
         projects.append({
             "id": project_id,
@@ -76,33 +65,31 @@ def fetch_projects(url: str):
     return projects
 
 
-def project_matches_keywords(project: dict, keywords: list) -> bool:
-    """يرجع True لو مفيش كلمات مفتاحية أصلاً، أو لو لقى أي كلمة منهم في العنوان أو الوصف."""
+def project_matches_keywords(project, keywords):
     if not keywords:
         return False
     haystack = (project["title"] + " " + project["description"]).lower()
     return any(kw.lower().strip() in haystack for kw in keywords if kw.strip())
 
 
-def load_seen_ids(path: str) -> set:
+def load_seen_ids(path):
     if not os.path.exists(path):
         return set()
     with open(path, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
 
-def save_seen_ids(path: str, ids_ordered: list):
-    # نحتفظ بآخر MAX_STORED_IDS بس
+def save_seen_ids(path, ids_ordered):
     trimmed = ids_ordered[:MAX_STORED_IDS]
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(trimmed))
 
 
-def send_telegram_message(text: str):
+def send_telegram_message(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("تحذير: TELEGRAM_TOKEN أو TELEGRAM_CHAT_ID مش متظبطين.", file=sys.stderr)
+        print("تحذير: التوكن أو الشات آيدي مش متظبطين.", file=sys.stderr)
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -111,25 +98,30 @@ def send_telegram_message(text: str):
     }
     resp = requests.post(url, data=data, timeout=20)
     if not resp.ok:
-        print(f"فشل إرسال رسالة تلجرام: {resp.status_code} {resp.text}", file=sys.stderr)
+        print("فشل إرسال رسالة تلجرام: " + str(resp.status_code) + " " + resp.text, file=sys.stderr)
+
+
+def build_message(tag, project):
+    title = project["title"]
+    url = project["url"]
+    return "🆕 مشروع جديد (" + tag + ")\n\n<b>" + title + "</b>\n" + url
 
 
 def main():
     try:
         category_projects = fetch_projects(CATEGORY_URL)
     except Exception as e:
-        print(f"خطأ أثناء جلب مشاريع القسم الأساسي: {e}", file=sys.stderr)
+        print("خطأ أثناء جلب مشاريع القسم الأساسي: " + str(e), file=sys.stderr)
         sys.exit(1)
 
-    # لو القسم الأساسي مش "كل الأقسام"، نجيب باقي الأقسام كمان عشان ندور فيهم بالكلمات المفتاحية
     other_projects = []
     if CATEGORY_URL != ALL_PROJECTS_URL:
         try:
             all_projects = fetch_projects(ALL_PROJECTS_URL)
-            category_ids = {p["id"] for p in category_projects}
+            category_ids = set(p["id"] for p in category_projects)
             other_projects = [p for p in all_projects if p["id"] not in category_ids]
         except Exception as e:
-            print(f"تحذير: تعذر جلب باقي الأقسام: {e}", file=sys.stderr)
+            print("تحذير: تعذر جلب باقي الأقسام: " + str(e), file=sys.stderr)
 
     if not category_projects and not other_projects:
         print("لم يتم العثور على أي مشاريع.")
@@ -144,6 +136,32 @@ def main():
     if not is_first_run:
         sent_count = 0
 
-        # القسم الأساسي: يتبعت كل حاجة فيه من غير شرط
         for p in reversed(new_from_category):
-            message = f"🆕 مشروع جديد (القسم الأساسي)\n\n<b>{p['title']}</b>\n{p
+            send_telegram_message(build_message("القسم الأساسي", p))
+            sent_count = sent_count + 1
+
+        matching_other = [p for p in new_from_other if project_matches_keywords(p, KEYWORDS)]
+        for p in reversed(matching_other):
+            send_telegram_message(build_message("كلمة مطابقة", p))
+            sent_count = sent_count + 1
+
+        skipped = len(new_from_other) - len(matching_other)
+        print("تم إرسال " + str(sent_count) + " إشعار. (تم تجاهل " + str(skipped) + " مشروع لعدم التطابق)")
+    else:
+        total_first = len(category_projects) + len(other_projects)
+        print("أول تشغيل: تم تسجيل " + str(total_first) + " مشروع من غير إرسال إشعارات.")
+
+    all_current_ids = [p["id"] for p in category_projects] + [p["id"] for p in other_projects]
+    seen_in_this_run = set()
+    deduped_ids = []
+    for pid in all_current_ids:
+        if pid not in seen_in_this_run:
+            seen_in_this_run.add(pid)
+            deduped_ids.append(pid)
+
+    all_ids_ordered = deduped_ids + [i for i in seen_ids if i not in seen_in_this_run]
+    save_seen_ids(SEEN_FILE, all_ids_ordered)
+
+
+if __name__ == "__main__":
+    main()
