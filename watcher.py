@@ -12,9 +12,17 @@ import requests
 from bs4 import BeautifulSoup
 
 # ============ الإعدادات ============
-PROJECTS_URL = "https://mostaql.com/projects"   # ممكن تغيرها لقسم معين، مثال:
-# PROJECTS_URL = "https://mostaql.com/projects/support"   # دعم ومساعدة وإدخال بيانات
-# PROJECTS_URL = "https://mostaql.com/projects/development"  # برمجة وتطوير
+# القسم الأساسي: أي مشروع جديد فيه يتبعت على طول من غير أي شرط
+CATEGORY_URL = "https://mostaql.com/projects/support"   # دعم، مساعدة وإدخال بيانات
+# لو عايز تغير القسم الأساسي، غير اللينك ده. أمثلة:
+# "https://mostaql.com/projects/development"  # برمجة وتطوير
+# "https://mostaql.com/projects"              # كل الأقسام (يلغي عملياً فكرة "باقي الأقسام")
+
+ALL_PROJECTS_URL = "https://mostaql.com/projects"  # ثابت - بيستخدم لفحص "باقي الأقسام"
+
+# الكلمات المفتاحية اللي بيتم البحث عنها في باقي الأقسام (غير القسم الأساسي)
+# افصل بين كل كلمة والتانية بفاصلة. لو سبتها فاضية، مفيش بحث في باقي الأقسام خالص.
+KEYWORDS = ["إدخال بيانات", "ادخال بيانات", "اكسيل", "Excel", "Data Entry"]
 
 SEEN_FILE = "seen_ids.txt"
 MAX_STORED_IDS = 1000  # عشان الملف ميكبرش من غير داعي
@@ -56,9 +64,24 @@ def fetch_projects(url: str):
         # أقصر نص مرتبط بنفس المشروع غالباً بيكون العنوان (مش الوصف الطويل)
         entries.sort(key=lambda pair: len(pair[0]))
         title, link = entries[0]
-        projects.append({"id": project_id, "title": title, "url": link})
+        # أطول نص مرتبط بنفس المشروع غالباً بيكون وصف المشروع الكامل
+        description = entries[-1][0] if len(entries) > 1 else title
+        projects.append({
+            "id": project_id,
+            "title": title,
+            "description": description,
+            "url": link,
+        })
 
     return projects
+
+
+def project_matches_keywords(project: dict, keywords: list) -> bool:
+    """يرجع True لو مفيش كلمات مفتاحية أصلاً، أو لو لقى أي كلمة منهم في العنوان أو الوصف."""
+    if not keywords:
+        return False
+    haystack = (project["title"] + " " + project["description"]).lower()
+    return any(kw.lower().strip() in haystack for kw in keywords if kw.strip())
 
 
 def load_seen_ids(path: str) -> set:
@@ -93,43 +116,34 @@ def send_telegram_message(text: str):
 
 def main():
     try:
-        projects = fetch_projects(PROJECTS_URL)
+        category_projects = fetch_projects(CATEGORY_URL)
     except Exception as e:
-        print(f"خطأ أثناء جلب المشاريع: {e}", file=sys.stderr)
+        print(f"خطأ أثناء جلب مشاريع القسم الأساسي: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not projects:
-        print("لم يتم العثور على أي مشاريع في الصفحة.")
+    # لو القسم الأساسي مش "كل الأقسام"، نجيب باقي الأقسام كمان عشان ندور فيهم بالكلمات المفتاحية
+    other_projects = []
+    if CATEGORY_URL != ALL_PROJECTS_URL:
+        try:
+            all_projects = fetch_projects(ALL_PROJECTS_URL)
+            category_ids = {p["id"] for p in category_projects}
+            other_projects = [p for p in all_projects if p["id"] not in category_ids]
+        except Exception as e:
+            print(f"تحذير: تعذر جلب باقي الأقسام: {e}", file=sys.stderr)
+
+    if not category_projects and not other_projects:
+        print("لم يتم العثور على أي مشاريع.")
         return
 
     seen_ids = load_seen_ids(SEEN_FILE)
     is_first_run = len(seen_ids) == 0
 
-    new_projects = [p for p in projects if p["id"] not in seen_ids]
+    new_from_category = [p for p in category_projects if p["id"] not in seen_ids]
+    new_from_other = [p for p in other_projects if p["id"] not in seen_ids]
 
-    # أول مرة تشتغل السكريبت: نسجل كل اللي موجود من غير ما نبعت إشعارات
-    # (عشان منغرقش نفسنا بعشرات الرسايل مرة واحدة)
-    if not is_first_run and new_projects:
-        # نبعتهم من الأقدم للأحدث عشان الترتيب يبقى منطقي في تلجرام
-        for p in reversed(new_projects):
-            message = (
-                f"🆕 مشروع جديد على مستقل\n\n"
-                f"<b>{p['title']}</b>\n"
-                f"{p['url']}"
-            )
-            send_telegram_message(message)
-        print(f"تم إرسال {len(new_projects)} إشعار.")
-    elif is_first_run:
-        print(f"أول تشغيل: تم تسجيل {len(projects)} مشروع من غير إرسال إشعارات.")
-    else:
-        print("مفيش مشاريع جديدة.")
+    if not is_first_run:
+        sent_count = 0
 
-    # نحدث قايمة اللي شفناهم (الأحدث فوق)
-    all_ids_ordered = [p["id"] for p in projects] + [
-        i for i in seen_ids if i not in {p["id"] for p in projects}
-    ]
-    save_seen_ids(SEEN_FILE, all_ids_ordered)
-
-
-if __name__ == "__main__":
-    main()
+        # القسم الأساسي: يتبعت كل حاجة فيه من غير شرط
+        for p in reversed(new_from_category):
+            message = f"🆕 مشروع جديد (القسم الأساسي)\n\n<b>{p['title']}</b>\n{p
